@@ -16,7 +16,7 @@ import org.keycloak.timer.TimerProvider;
 public class DcrLifecycleEventListenerProviderFactory implements EventListenerProviderFactory {
 
     private static final Logger log = Logger.getLogger(DcrLifecycleEventListenerProviderFactory.class);
-    public static final String PROVIDER_ID = "dcr-user-linker";
+    public static final String PROVIDER_ID = "dcr-lifecycle-manager";
 
     @Override
     public EventListenerProvider create(KeycloakSession session) {

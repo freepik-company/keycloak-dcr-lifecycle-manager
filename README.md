@@ -13,8 +13,8 @@ Applications and MCPs (like ChatGPT, Claude, Zed, Cursor) use DCR to dynamically
 This SPI implements a complete garbage collection and linking system in two phases:
 
 ### Phase 1: Real-time Tagging & Linking
-* **Tagging on Creation:** Intercepts `AdminEvent` when a client is created. It automatically injects an exact timestamp (`dcr_created_at`) and a deterministically calculated Fingerprint (`dcr_fingerprint` based on redirect URIs and client name).
-* **Linking & Cleanup on Login:** Intercepts `Event` on user login. If the client used is a DCR client, it links the user to it (`linked_user_id`). Immediately after, it safely deletes all older clients belonging to that exact user and fingerprint.
+* **Tagging on Creation:** Intercepts Keycloak's `CLIENT_REGISTER` event (which fires exclusively during standard OIDC DCR flows, ensuring manually created clients are safely ignored). It automatically injects an exact timestamp (`dcr_created_at`) and a deterministically calculated Fingerprint (`dcr_fingerprint` based on redirect URIs and client name).
+* **Linking & Cleanup on Login:** Intercepts standard `LOGIN` events. If the client used is a tagged DCR client, it links the user to it (`linked_user_id`). Immediately after, it safely deletes all older clients belonging to that exact user and fingerprint.
 
 ### Phase 2: Asynchronous Garbage Collection
 * **Orphan Cleanup:** A Cluster-Aware scheduled task (`TimerProvider` + `ClusterProvider`) wakes up every hour.
@@ -54,7 +54,7 @@ Once the `.jar` is deployed to your Keycloak's `providers/` directory and the se
 2. Select your Realm.
 3. Go to **Realm settings** in the left menu.
 4. Go to the **Events** tab.
-5. In the **Event Listeners** field, add `dcr-user-linker`.
+5. In the **Event Listeners** field, add `dcr-lifecycle-manager`.
 6. Save the changes. 
 
 *(Note: The integration test script does this automatically via the Admin REST API).*

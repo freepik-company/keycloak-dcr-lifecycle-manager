@@ -26,8 +26,8 @@ def enable_event_listener(token):
         config = json.loads(response.read().decode())
     
     listeners = config.get('eventsListeners', [])
-    if 'dcr-user-linker' not in listeners:
-        listeners.append('dcr-user-linker')
+    if 'dcr-lifecycle-manager' not in listeners:
+        listeners.append('dcr-lifecycle-manager')
     config['eventsListeners'] = listeners
     config['adminEventsEnabled'] = True
     config['eventsEnabled'] = True
