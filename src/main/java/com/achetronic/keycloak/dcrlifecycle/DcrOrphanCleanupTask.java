@@ -8,6 +8,12 @@ import org.keycloak.timer.ScheduledTask;
 
 import java.util.concurrent.Callable;
 
+/**
+ * A Keycloak Scheduled Task that cleans up orphaned DCR clients.
+ * This runs periodically and ensures HA compatibility using Keycloak's ClusterProvider
+ * distributed lock system. It looks for DCR clients created more than 24h ago
+ * that never received a user login.
+ */
 public class DcrOrphanCleanupTask implements ScheduledTask {
     private static final Logger log = Logger.getLogger(DcrOrphanCleanupTask.class);
     
@@ -15,6 +21,13 @@ public class DcrOrphanCleanupTask implements ScheduledTask {
     private static final long GRACE_PERIOD_MS = 24 * 60 * 60 * 1000L; 
     private static final String TASK_KEY = "dcr-orphan-cleanup-lock";
 
+    /**
+     * Entry point for the scheduled task.
+     * Uses ClusterProvider to obtain a distributed lock before executing the cleanup
+     * to prevent multiple cluster nodes from running it simultaneously.
+     *
+     * @param session The Keycloak Session.
+     */
     @Override
     public void run(KeycloakSession session) {
         ClusterProvider clusterProvider = session.getProvider(ClusterProvider.class);
@@ -38,6 +51,13 @@ public class DcrOrphanCleanupTask implements ScheduledTask {
         }
     }
 
+    /**
+     * Performs the actual cleanup logic across all realms.
+     * Finds DCR clients that have the DCR tag but lack a linked user,
+     * and deletes them if they are older than the grace period.
+     *
+     * @param session The Keycloak Session.
+     */
     private void doCleanup(KeycloakSession session) {
         long now = System.currentTimeMillis();
         

@@ -9,6 +9,10 @@ import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.timer.TimerProvider;
 
+/**
+ * Factory for creating instances of {@link DcrLifecycleEventListenerProvider}.
+ * Also responsible for scheduling the Orphan Cleanup Timer Task on startup.
+ */
 public class DcrLifecycleEventListenerProviderFactory implements EventListenerProviderFactory {
 
     private static final Logger log = Logger.getLogger(DcrLifecycleEventListenerProviderFactory.class);

@@ -19,6 +19,11 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * EventListenerProvider implementation for DCR Lifecycle Manager.
+ * Intercepts Client Creation events to tag them, and Login events to link
+ * users and delete older unused DCR clients with the same fingerprint.
+ */
 public class DcrLifecycleEventListenerProvider implements EventListenerProvider {
 
     private static final Logger log = Logger.getLogger(DcrLifecycleEventListenerProvider.class);
@@ -33,6 +38,13 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
         this.session = session;
     }
 
+    /**
+     * Handles standard Keycloak events.
+     * Specifically looks for successful LOGIN events to link the user to a DCR client
+     * and trigger the garbage collection of older duplicate clients.
+     *
+     * @param event The triggered Keycloak event.
+     */
     @Override
     public void onEvent(Event event) {
         // We only care about successful logins
@@ -76,6 +88,14 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
         }
     }
 
+    /**
+     * Cleans up older DCR clients belonging to the same user and platform (fingerprint).
+     *
+     * @param realm             The current Keycloak Realm.
+     * @param userId            The user ID that logged in.
+     * @param currentClientUuid The UUID of the client currently being used.
+     * @param fingerprint       The deterministic fingerprint of the platform.
+     */
     private void cleanupOldClients(RealmModel realm, String userId, String currentClientUuid, String fingerprint) {
         log.debugf("Starting cleanup for user %s, fingerprint: %s", userId, fingerprint);
         
@@ -91,6 +111,14 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
                 });
     }
 
+    /**
+     * Handles Keycloak Admin events.
+     * Specifically looks for Client CREATE events to tag the newly created DCR client
+     * with its creation timestamp and deterministic fingerprint.
+     *
+     * @param event               The triggered Admin event.
+     * @param includeRepresentation Whether the event includes the resource representation.
+     */
     @Override
     public void onEvent(AdminEvent event, boolean includeRepresentation) {
         // We only care about Client Creation
@@ -128,7 +156,15 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
         }
     }
 
-    private String calculateFingerprint(ClientModel client) {
+    /**
+     * Calculates a deterministic fingerprint based on the client's redirect URIs and name.
+     * Extracts scheme and host from each URI, sorts them, and concatenates with the client name.
+     *
+     * @param client The Keycloak ClientModel.
+     * @return A fingerprint string uniquely identifying the client's origins.
+     */
+    // Visibility changed to package-private for testing
+    String calculateFingerprint(ClientModel client) {
         Set<String> schemeHosts = new HashSet<>();
         
         Set<String> redirectUris = client.getRedirectUris();

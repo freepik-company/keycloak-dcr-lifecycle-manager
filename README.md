@@ -21,6 +21,13 @@ This SPI implements a complete garbage collection and linking system in two phas
 * **Logic:** Finds any DCR client that is older than 24 hours and has *never* had a user linked to it (meaning the user abandoned the login flow).
 * **High Availability:** Uses Distributed Locks to ensure that in a multi-node Keycloak cluster, only one node performs the cleanup.
 
+## How the Fingerprint is Calculated
+The `dcr_fingerprint` acts as a deterministic grouping identifier for DCR clients originating from the same platform/app. It is calculated by:
+1. Extracting the `scheme` and `host` (e.g., `https://claude.ai`, `cursor://auth`) from every registered `redirect_uris`.
+2. Sorting these origins alphabetically and removing duplicates.
+3. Concatenating the result with the `clientName` (e.g., `https://claude.ai|Claude`).
+4. Applying an SHA-256 hash to ensure a standardized length.
+
 ## Build and Run
 
 You don't need Java or Maven installed on your machine. Everything runs via Docker containers.
@@ -42,3 +49,7 @@ make stop
 ## How to Check Attributes
 
 Although the new Keycloak Admin Console does not show custom Client attributes natively in the UI, this SPI stores everything perfectly in the `CLIENT_ATTRIBUTES` database table. You can verify the `dcr_created_at`, `dcr_fingerprint`, and `linked_user_id` attributes by fetching the client via the Keycloak REST API.
+
+---
+
+Created with 💖 by Alby Hernández

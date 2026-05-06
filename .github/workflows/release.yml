@@ -1,0 +1,118 @@
+name: Release Keycloak SPI
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semver version for the release (e.g., v0.0.0)'
+        required: true
+        type: string
+      use_main_branch:
+        description: 'Take code from default branch instead of the current ref'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine Git Ref
+        id: git-ref
+        run: |
+          if [ "${{ github.event.inputs.use_main_branch }}" == "true" ]; then
+            echo "ref=${{ github.event.repository.default_branch }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=${{ github.ref }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.git-ref.outputs.ref }}
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: make build
+
+      - name: Extract Version
+        id: extract_version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          fi
+
+      - name: Create or Update Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          tag_name: ${{ env.VERSION }}
+          files: target/*-jar-with-dependencies.jar,target/*.jar
+          fail_on_unmatched_files: false
+          generate_release_notes: true
+
+      - name: Upload Release Asset (On normal release)
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'release'
+        with:
+          files: target/*-jar-with-dependencies.jar,target/*.jar
+
+      - name: Upload JAR artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: keycloak-spi-jar
+          path: target/*.jar
+
+  docker:
+    runs-on: default
+    needs: build-and-release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download JAR artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: keycloak-spi-jar
+          path: target
+
+      - name: "Set up Cloud SDK"
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: ">= 363.0.0"
+
+      - name: "Set up QEMU"
+        id: qemu
+        uses: docker/setup-qemu-action@v3
+        with:
+          image: tonistiigi/binfmt:latest
+          platforms: all
+
+      - name: "Set up Docker Buildx"
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker Login to GAR
+        run: |
+          gcloud auth configure-docker europe-docker.pkg.dev
+
+      - name: Build and push Docker image
+        run: |
+          RELEASE_TAG="${{ github.event.inputs.version || github.ref_name }}"
+          IMG="europe-docker.pkg.dev/fc-artifacts/applications/$GITHUB_REPOSITORY:$RELEASE_TAG"
+          docker build -t "$IMG" .
+          docker push "$IMG"
