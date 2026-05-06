@@ -11,7 +11,10 @@ import org.keycloak.timer.TimerProvider;
 
 /**
  * Factory for creating instances of {@link DcrLifecycleEventListenerProvider}.
- * Also responsible for scheduling the orphan cleanup timer task on startup.
+ * <p>
+ * Loads the runtime configuration from environment variables on startup and
+ * registers the periodic {@link DcrOrphanCleanupTask} with Keycloak's
+ * {@link TimerProvider}.
  */
 public class DcrLifecycleEventListenerProviderFactory implements EventListenerProviderFactory {
 
@@ -23,8 +26,7 @@ public class DcrLifecycleEventListenerProviderFactory implements EventListenerPr
     /** Name of the scheduled cleanup task registered into Keycloak's TimerProvider. */
     private static final String CLEANUP_TASK_NAME = "dcr-orphan-cleanup-task";
 
-    /** Frequency of the scheduled cleanup task (1 hour, in milliseconds). */
-    private static final long CLEANUP_INTERVAL_MS = 60 * 60 * 1000L;
+    private DcrLifecycleConfig config;
 
     @Override
     public EventListenerProvider create(KeycloakSession session) {
@@ -32,18 +34,25 @@ public class DcrLifecycleEventListenerProviderFactory implements EventListenerPr
     }
 
     @Override
-    public void init(Config.Scope config) {
-        // No initialization required
+    public void init(Config.Scope scope) {
+        this.config = DcrLifecycleConfig.fromEnv();
     }
 
     @Override
     public void postInit(KeycloakSessionFactory factory) {
-        // Register the scheduled task during the post-initialization phase.
+        if (config == null) {
+            // Defensive: should never happen since init() runs before postInit().
+            config = DcrLifecycleConfig.fromEnv();
+        }
+
+        final DcrLifecycleConfig effectiveConfig = config;
         KeycloakModelUtils.runJobInTransaction(factory, session -> {
             TimerProvider timer = session.getProvider(TimerProvider.class);
             if (timer != null) {
-                timer.scheduleTask(new DcrOrphanCleanupTask(), CLEANUP_INTERVAL_MS, CLEANUP_TASK_NAME);
-                log.infof("Scheduled orphan DCR cleanup task '%s' every %d ms.", CLEANUP_TASK_NAME, CLEANUP_INTERVAL_MS);
+                long intervalMs = effectiveConfig.getCleanupIntervalMs();
+                timer.scheduleTask(new DcrOrphanCleanupTask(effectiveConfig), intervalMs, CLEANUP_TASK_NAME);
+                log.infof("Scheduled orphan DCR cleanup task '%s' every %d minutes (strategy=%s).",
+                        CLEANUP_TASK_NAME, effectiveConfig.getCleanupIntervalMinutes(), effectiveConfig.getStrategy());
             } else {
                 log.warn("TimerProvider not found. Orphan DCR cleanup task will NOT run.");
             }

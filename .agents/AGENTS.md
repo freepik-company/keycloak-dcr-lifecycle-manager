@@ -4,7 +4,7 @@ Welcome to the `keycloak-dcr-lifecycle-manager` repository.
 
 ## 🤖 Agent Guidelines
 
-All agentic documentation, context, and structural decisions MUST live inside the `.agents/` directory.
+All agentic documentation, context, and structural decisions MUST live inside the `.agents/` directory and MUST be written in English.
 
 - **`.agents/AGENTS.md`**: This file. The entry point for agents.
 - **`.agents/DESIGN_DECISIONS.md`**: Contains the business logic, the architectural strategy, and all technical decisions made regarding how we handle DCR linking and garbage collection.

@@ -16,9 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for DcrLifecycleEventListenerProvider.
- * Validates that the fingerprint generation is deterministic, ignores wildcards
- * and properly hashes inputs using SHA-256.
+ * Unit tests for the fingerprint generation logic of
+ * {@link DcrLifecycleEventListenerProvider}.
  */
 class DcrLifecycleEventListenerProviderTest {
 

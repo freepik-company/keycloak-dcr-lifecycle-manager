@@ -13,24 +13,37 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
  * EventListenerProvider implementation for DCR Lifecycle Manager.
- * Intercepts standard OIDC Client Registration events to tag them, and Login
- * events to link users and delete older unused DCR clients with the same fingerprint.
+ * <p>
+ * Handles two phases of the SPI:
+ * <ul>
+ *   <li><b>CLIENT_REGISTER</b>: tags newly created DCR clients with metadata
+ *       ({@code is_dcr_client}, {@code created_at}, {@code fingerprint}).</li>
+ *   <li><b>LOGIN</b>: marks the client as used by a given user
+ *       ({@code linked_user_id}, {@code used_at}).</li>
+ * </ul>
+ * The actual cleanup of duplicates and orphans is delegated to
+ * {@link DcrOrphanCleanupTask} to keep this hot path as fast as possible.
  */
 public class DcrLifecycleEventListenerProvider implements EventListenerProvider {
 
     private static final Logger log = Logger.getLogger(DcrLifecycleEventListenerProvider.class);
 
-    public static final String ATTR_DCR_CREATED_AT = "dcr_created_at";
-    public static final String ATTR_DCR_FINGERPRINT = "dcr_fingerprint";
+    /** Marks a client as having been created via standard OIDC DCR. */
+    public static final String ATTR_IS_DCR_CLIENT = "is_dcr_client";
+    /** Timestamp (epoch ms) when the DCR client was registered. */
+    public static final String ATTR_CREATED_AT = "created_at";
+    /** Deterministic SHA-256 fingerprint identifying the platform/app behind the client. */
+    public static final String ATTR_FINGERPRINT = "fingerprint";
+    /** Keycloak user UUID of the user that has logged in with this DCR client. */
     public static final String ATTR_LINKED_USER_ID = "linked_user_id";
+    /** Timestamp (epoch ms) of the last successful login on this DCR client. */
+    public static final String ATTR_USED_AT = "used_at";
 
     private static final String UNKNOWN_CLIENT_NAME = "Unknown";
     private static final String NONE_PLACEHOLDER = "none";
@@ -43,16 +56,13 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
     }
 
     /**
-     * Handles standard Keycloak events.
-     * Looks for CLIENT_REGISTER events to tag newly created DCR clients,
-     * and LOGIN events to link the user to a DCR client and trigger garbage collection.
-     *
-     * @param event The triggered Keycloak event.
+     * Routes Keycloak events to the appropriate handler.
+     * Failed events (with error) are intentionally ignored to avoid tagging
+     * or linking on broken flows.
      */
     @Override
     public void onEvent(Event event) {
         if (event == null || event.getError() != null) {
-            // Ignore failed events to avoid tagging or linking on errors
             return;
         }
 
@@ -67,9 +77,7 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
     }
 
     /**
-     * Tags a newly created DCR client with its creation timestamp and fingerprint.
-     *
-     * @param event The CLIENT_REGISTER event.
+     * Tags a newly created DCR client with its identifying metadata.
      */
     private void handleClientRegister(Event event) {
         String clientId = event.getClientId();
@@ -91,10 +99,11 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
 
         try {
             String fingerprint = calculateFingerprint(clientModel);
-
             long now = System.currentTimeMillis();
-            clientModel.setAttribute(ATTR_DCR_CREATED_AT, String.valueOf(now));
-            clientModel.setAttribute(ATTR_DCR_FINGERPRINT, fingerprint);
+
+            clientModel.setAttribute(ATTR_IS_DCR_CLIENT, "true");
+            clientModel.setAttribute(ATTR_CREATED_AT, String.valueOf(now));
+            clientModel.setAttribute(ATTR_FINGERPRINT, fingerprint);
 
             log.infof("Tagged new DCR client %s with fingerprint: %s", clientModel.getClientId(), fingerprint);
         } catch (Exception e) {
@@ -103,10 +112,9 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
     }
 
     /**
-     * Links the logged-in user to the DCR client and triggers cleanup of older
-     * duplicate clients for the same user/platform.
-     *
-     * @param event The LOGIN event.
+     * Marks the client as used by the logged-in user. The actual cleanup of
+     * duplicates is performed asynchronously by {@link DcrOrphanCleanupTask},
+     * keeping this hot path lightweight.
      */
     private void handleLogin(Event event) {
         String userId = event.getUserId();
@@ -127,81 +135,31 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
             return;
         }
 
-        // Only act on DCR clients that have been previously tagged
-        String dcrCreatedAt = currentClient.getAttribute(ATTR_DCR_CREATED_AT);
-        if (dcrCreatedAt == null) {
+        // Fast filter: only act on DCR-tagged clients
+        if (!"true".equals(currentClient.getAttribute(ATTR_IS_DCR_CLIENT))) {
             return;
         }
 
-        // Link the user to the client
-        log.infof("Linking user %s to DCR client %s", userId, currentClient.getId());
+        long now = System.currentTimeMillis();
         currentClient.setAttribute(ATTR_LINKED_USER_ID, userId);
+        currentClient.setAttribute(ATTR_USED_AT, String.valueOf(now));
 
-        // Trigger cleanup of older clients from the same provider/user
-        String currentFingerprint = currentClient.getAttribute(ATTR_DCR_FINGERPRINT);
-        if (currentFingerprint != null) {
-            try {
-                cleanupOldClients(realm, userId, currentClient.getId(), currentFingerprint);
-            } catch (Exception e) {
-                // Never let cleanup errors break a successful login flow
-                log.errorf(e, "Cleanup of older DCR clients failed for user %s, client %s", userId, currentClient.getId());
-            }
-        }
+        log.debugf("Marked DCR client %s as used by user %s", currentClient.getClientId(), userId);
     }
 
     /**
-     * Cleans up older DCR clients belonging to the same user and platform (fingerprint).
-     * Materializes the candidate list before deletion to avoid concurrent modification
-     * issues while iterating the client stream.
-     *
-     * @param realm             The current Keycloak Realm.
-     * @param userId            The user ID that logged in.
-     * @param currentClientUuid The UUID of the client currently being used.
-     * @param fingerprint       The deterministic fingerprint of the platform.
-     */
-    private void cleanupOldClients(RealmModel realm, String userId, String currentClientUuid, String fingerprint) {
-        log.debugf("Starting cleanup for user %s, fingerprint: %s", userId, fingerprint);
-
-        // Materialize the list of UUIDs to delete BEFORE removing them, to avoid
-        // ConcurrentModificationException or undefined behavior when iterating the stream.
-        List<String> clientsToDelete = session.clients().getClientsStream(realm)
-                .filter(c -> userId.equals(c.getAttribute(ATTR_LINKED_USER_ID)))
-                .filter(c -> fingerprint.equals(c.getAttribute(ATTR_DCR_FINGERPRINT)))
-                .filter(c -> !currentClientUuid.equals(c.getId()))
-                .map(ClientModel::getId)
-                .collect(Collectors.toList());
-
-        for (String uuid : clientsToDelete) {
-            ClientModel oldClient = session.clients().getClientById(realm, uuid);
-            if (oldClient == null) {
-                continue;
-            }
-            log.infof("Deleting orphaned DCR client %s for user %s", oldClient.getClientId(), userId);
-            session.clients().removeClient(realm, uuid);
-        }
-    }
-
-    /**
-     * Handles Keycloak Admin events.
-     * We deliberately ignore Admin events because we only want to tag clients created
-     * via the standard OIDC DCR endpoint (CLIENT_REGISTER event), not clients created
-     * manually through the Admin REST API or the admin console.
-     *
-     * @param event                 The triggered Admin event.
-     * @param includeRepresentation Whether the event includes the resource representation.
+     * Admin events are intentionally ignored: only DCR-flow CLIENT_REGISTER events
+     * tag clients, so manually created clients are left untouched.
      */
     @Override
     public void onEvent(AdminEvent event, boolean includeRepresentation) {
-        // Intentionally ignored to prevent tagging and deleting manually created clients.
+        // Intentionally ignored.
     }
 
     /**
-     * Calculates a deterministic SHA-256 fingerprint based on the client's redirect URIs
-     * and name. Extracts scheme and host from each URI, sorts them, concatenates them
-     * with the client name, and applies SHA-256 to keep the attribute size bounded.
-     *
-     * @param client The Keycloak ClientModel.
-     * @return A SHA-256 hex string identifying the client's origins.
+     * Calculates a deterministic SHA-256 fingerprint from the client's redirect URIs
+     * and client name. This groups DCR clients originating from the same
+     * platform/app (e.g., all Claude clients share a fingerprint).
      */
     // Visibility changed to package-private for testing
     String calculateFingerprint(ClientModel client) {
@@ -230,16 +188,11 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
 
         String clientName = client.getName() != null ? client.getName() : UNKNOWN_CLIENT_NAME;
 
-        String rawFingerprint = sortedUris + "|" + clientName;
-        return sha256Hex(rawFingerprint);
+        return sha256Hex(sortedUris + "|" + clientName);
     }
 
     /**
      * Computes the SHA-256 hash of the given input as a lowercase hexadecimal string.
-     * Falls back to the raw input if SHA-256 is somehow unavailable in the JVM.
-     *
-     * @param input The string to hash.
-     * @return Lowercase hexadecimal SHA-256 digest.
      */
     private static String sha256Hex(String input) {
         try {
@@ -251,7 +204,6 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
             }
             return sb.toString();
         } catch (NoSuchAlgorithmException e) {
-            // Extremely unlikely; fall back to the raw value rather than failing the registration
             log.error("SHA-256 not available, falling back to raw fingerprint", e);
             return input;
         }

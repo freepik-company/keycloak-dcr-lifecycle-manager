@@ -1,48 +1,73 @@
-# Estrategia de Vinculación y Limpieza de Clientes DCR en Keycloak
+# DCR Client Linking and Cleanup Strategy in Keycloak
 
-## Problema
-El Registro Dinámico de Clientes (DCR) utilizado por plataformas y MCPs (como ChatGPT y Claude) genera un volumen masivo de clientes. Muchos de estos clientes quedan huérfanos una vez finaliza la sesión del usuario. Además, en el realm conviven clientes creados manualmente con clientes DCR, por lo que la limpieza debe ser muy selectiva.
+## Problem
+Dynamic Client Registration (DCR), used by platforms and MCPs (such as ChatGPT and Claude), generates a massive volume of clients. Many of these clients become orphans once the user session ends. Additionally, manually created clients coexist in the realm with DCR clients, so the cleanup must be highly selective.
 
-## Plan de Acción Propuesto
+## Data Model: 5 Attributes per DCR Client
 
-Para gestionar esto de forma segura en un entorno de Alta Disponibilidad (HA) y diferenciar los tipos de clientes, implementaremos una estrategia de dos fases dentro del mismo proyecto Java (usando SPIs de Keycloak):
+| Attribute        | When written              | Who writes it                  | Purpose |
+|------------------|---------------------------|--------------------------------|---------|
+| `is_dcr_client`  | On DCR registration       | Phase 1 (`CLIENT_REGISTER`)    | Authoritative flag. If not `"true"`, no SPI component touches the client. |
+| `created_at`     | On DCR registration       | Phase 1 (`CLIENT_REGISTER`)    | Epoch ms timestamp. Used by Phase 2 to detect pure orphans. |
+| `fingerprint`    | On DCR registration       | Phase 1 (`CLIENT_REGISTER`)    | Deterministic SHA-256 of `redirect_uris` + client name. Groups equivalent clients (e.g., all Claude clients share the same fingerprint). |
+| `linked_user_id` | On every successful LOGIN | Phase 1 (`LOGIN`)              | Keycloak user UUID that has used the client. |
+| `used_at`        | On every successful LOGIN | Phase 1 (`LOGIN`)              | Epoch ms timestamp of the most recent login. Allows Phase 2 to decide the "winner" between duplicates. |
 
-### [x] Fase 1: Marcado en tiempo de creación y Limpieza "en vivo" (Event Listener)
+The `is_dcr_client` flag is the source of truth. The other attributes use generic names (without prefix) for consistency with Keycloak's natural model.
 
-1.  **Interceptar la creación (AdminEvent `CREATE` CLIENT):**
-    *   Cuando se crea un cliente, no sabemos de quién es, pero **sabemos que acaba de nacer**.
-    *   El EventListener intercepta este evento y le añade un atributo al cliente recién creado: `dcr_created_at = <timestamp_actual>`.
-    *   Generamos un **Fingerprint (Huella Compuesta y Determinista)**: 
-        1. Para cada `redirect_uri` proporcionada por el cliente, extraemos su esquema y su host (ej. `https://claude.ai`, `http://localhost`, `cursor://auth`). Esto cubre custom schemes de apps de escritorio.
-        2. Eliminamos duplicados y ordenamos alfabéticamente esta lista de orígenes.
-        3. Lo concatenamos todo junto al `clientName` del cliente. (Ej: `https://claude.ai|Claude`, `http://localhost,cursor://auth|Cursor IDE`).
-        4. Guardamos este valor (o un hash SHA-256 del mismo si es muy largo) en el atributo `dcr_fingerprint`.
-    *   *Objetivo cumplido:* Ya sabemos diferenciar un cliente DCR de uno manual, y además los tenemos "agrupados" genéricamente por el dominio de su callback.
+## Phase 1: Hot-path Tagging (Event Listener)
 
-2.  **Interceptar el Login (Event `LOGIN`):**
-    *   El usuario se loga. El EventListener captura el evento.
-    *   Extraemos el `clientId` y buscamos el cliente. ¿Tiene la marca `dcr_created_at`? Si no la tiene, ignoramos (es un cliente manual).
-    *   Si la tiene, le añadimos un segundo atributo: `linked_user_id = <userId>`.
-    *   **Limpieza en vivo:** En ese mismo instante, buscamos en Keycloak todos los clientes que cumplan:
-        *   `linked_user_id == <userId>`
-        *   `dcr_fingerprint == <fingerprint_del_cliente_actual>`
-        *   `clientId != <current_clientId>`
-    *   Borramos esos clientes (Ej: Borramos los viejos de ChatGPT, pero dejamos los de Claude).
+### `CLIENT_REGISTER`
+- Intercepts the standard OIDC event (not the `AdminEvent`), guaranteeing that **manually created clients are never tagged**.
+- Atomically writes **3 attributes**: `is_dcr_client`, `created_at`, `fingerprint`.
 
-### [x] Fase 2: Limpieza de "Huérfanos Puros" (Timer Task con soporte HA)
+### `LOGIN`
+- Instant filter: if the client is not tagged with `is_dcr_client="true"`, return early.
+- Writes **2 attributes**: `linked_user_id` and `used_at`.
+- **No other clients are scanned and nothing is deleted at this point.** The hot path stays at constant O(1).
+- Rationale: performing synchronous cleanup during login introduced two risks:
+    1. Unacceptable latency in large realms (scanning thousands of clients).
+    2. Race conditions with concurrent logins of the same user across different clients (mutual deletion).
 
-¿Qué pasa con los clientes que se crearon por DCR pero el usuario nunca llegó a logarse? Se quedan con la marca `dcr_created_at` pero sin `linked_user_id`.
+## Phase 2: Garbage Collector (Scheduled Task with HA)
 
-1.  **Crear una Scheduled Task (TimerProvider):**
-    *   Se ejecutará periódicamente (ej. cada hora).
-2.  **Asegurar Alta Disponibilidad (ClusterProvider):**
-    *   Al despertar, la tarea intentará obtener un cerrojo distribuido (Distributed Lock) usando `session.getProvider(ClusterProvider.class).executeIfNotExecuted("dcr-cleanup-task", timeout)`.
-    *   Esto garantiza que, aunque haya 3 nodos de Keycloak, solo 1 ejecuta la limpieza.
-3.  **Lógica de Borrado:**
-    *   Buscar clientes que tengan `dcr_created_at`.
-    *   Filtrar los que **NO** tengan `linked_user_id`.
-    *   Comprobar si el tiempo transcurrido desde `dcr_created_at` es mayor a un "periodo de gracia" (ej. 24 horas).
-    *   Borrar los que cumplan esta condición.
+A scheduled task runs every `DCR_LIFECYCLE_CLEANUP_INTERVAL_MINUTES` minutes (default 60) and executes under a **distributed lock** via `ClusterProvider.executeIfNotExecuted`. In an N-node cluster, only one node runs it at a time.
+
+The task scans every client where `is_dcr_client="true"` and applies two passes:
+
+### Pass 1: Pure Orphans
+A client whose `linked_user_id == null` and `now - created_at > GRACE_PERIOD_HOURS` is deleted.
+
+### Pass 2: Linked Duplicates
+Linked clients are grouped by `(linked_user_id, fingerprint)` and the **configured strategy** is applied:
+
+#### Strategy A — "Last wins" (default)
+- If the group contains more than one client: keep the most recent `used_at`, delete the rest.
+- If the group contains exactly one client: **never** delete.
+
+**When to choose A:** when DCR clients tend to be ephemeral (platforms regenerate a new one every time the user reconnects).
+
+#### Strategy B — "Inactivity grace"
+- A client whose `now - used_at > INACTIVITY_DAYS` becomes a deletion candidate.
+- If the client is the only one in its group, it is only deleted when `DELETE_LONELY_INACTIVE=true`.
+
+**When to choose B:** when DCR clients remain stable for months and a single user may legitimately have several active devices.
+
+## Key Decisions and Why
+
+### Why remove cleanup from the LOGIN path?
+Initially the cleanup happened synchronously during LOGIN. Two problems were detected:
+1. **Latency:** in realms with thousands of clients, the scan added hundreds of ms to every login.
+2. **Race conditions:** two concurrent logins of the same user on different Claude clients deleted each other.
+
+The solution was to move all deletion logic to Phase 2, leaving LOGIN with just the `linked_user_id` and `used_at` updates. Phase 2 has all the information it needs thanks to the 5-attribute model.
+
+### Why `is_dcr_client` if we already have `created_at`?
+For semantic consistency: the flag explicitly declares the nature of the client. Filtering by `created_at != null` would technically work but loses clarity. The cost is one extra attribute, irrelevant in practice.
+
+### Why configure via environment variables instead of Keycloak's `Config.Scope`?
+Simpler to inject in containerized environments (Docker, Kubernetes) and consistent with standard 12-factor deployment practices.
 
 ---
-Ambas fases han sido implementadas en el código (`DcrLifecycleEventListenerProvider` y `DcrOrphanCleanupTask`).
+
+Both phases are implemented in `DcrLifecycleEventListenerProvider`, `DcrOrphanCleanupTask`, and `DcrLifecycleEventListenerProviderFactory`, with configuration encapsulated in `DcrLifecycleConfig`.
