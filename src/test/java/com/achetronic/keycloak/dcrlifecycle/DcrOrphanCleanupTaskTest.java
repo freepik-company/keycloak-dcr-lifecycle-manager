@@ -36,6 +36,32 @@ class DcrOrphanCleanupTaskTest {
         return client;
     }
 
+    /**
+     * Helper: build a mock DCR client representing a "pure orphan" (no linked user).
+     */
+    private ClientModel mockOrphanClient(String id, long createdAt) {
+        ClientModel client = Mockito.mock(ClientModel.class);
+        when(client.getId()).thenReturn(id);
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID))
+                .thenReturn(null);
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_CREATED_AT))
+                .thenReturn(String.valueOf(createdAt));
+        return client;
+    }
+
+    /**
+     * Helper: build a mock DCR client linked to a user (NOT an orphan).
+     */
+    private ClientModel mockLinkedClient(String id, String userId, long createdAt) {
+        ClientModel client = Mockito.mock(ClientModel.class);
+        when(client.getId()).thenReturn(id);
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID))
+                .thenReturn(userId);
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_CREATED_AT))
+                .thenReturn(String.valueOf(createdAt));
+        return client;
+    }
+
     private DcrOrphanCleanupTask taskWith(DcrLifecycleConfig config) {
         return new DcrOrphanCleanupTask(config);
     }
@@ -129,5 +155,88 @@ class DcrOrphanCleanupTaskTest {
         List<String> toDelete = task.applyStrategyB(group, NOW);
 
         assertTrue(toDelete.isEmpty(), "Active lonely client must always be kept");
+    }
+
+    // -------------------------------------------------------------------------
+    // collectPureOrphans (Phase 2 - Pass 1)
+    // -------------------------------------------------------------------------
+
+    @Test
+    void collectPureOrphans_deletesUnlinkedClientsOlderThanGracePeriod() {
+        DcrLifecycleConfig cfg = new DcrLifecycleConfig(
+                DcrLifecycleConfig.Strategy.A, 30, false, 24, 60);
+        DcrOrphanCleanupTask task = taskWith(cfg);
+
+        long gracePeriodMs = cfg.getGracePeriodMs();
+        ClientModel oldOrphan = mockOrphanClient("old-orphan", NOW - gracePeriodMs - ONE_DAY_MS);
+        ClientModel veryOldOrphan = mockOrphanClient("very-old-orphan", NOW - gracePeriodMs - 30 * ONE_DAY_MS);
+
+        List<String> toDelete = task.collectPureOrphans(List.of(oldOrphan, veryOldOrphan), NOW);
+
+        assertEquals(2, toDelete.size());
+        assertTrue(toDelete.contains("old-orphan"));
+        assertTrue(toDelete.contains("very-old-orphan"));
+    }
+
+    @Test
+    void collectPureOrphans_keepsClientsWithinGracePeriod() {
+        DcrLifecycleConfig cfg = new DcrLifecycleConfig(
+                DcrLifecycleConfig.Strategy.A, 30, false, 24, 60);
+        DcrOrphanCleanupTask task = taskWith(cfg);
+
+        // Created just 1 hour ago: must NOT be deleted (grace = 24h)
+        ClientModel recent = mockOrphanClient("recent-orphan", NOW - 60 * 60 * 1000L);
+
+        List<String> toDelete = task.collectPureOrphans(List.of(recent), NOW);
+
+        assertTrue(toDelete.isEmpty(), "Orphan within grace period must NOT be deleted");
+    }
+
+    @Test
+    void collectPureOrphans_ignoresLinkedClients() {
+        DcrLifecycleConfig cfg = new DcrLifecycleConfig(
+                DcrLifecycleConfig.Strategy.A, 30, false, 24, 60);
+        DcrOrphanCleanupTask task = taskWith(cfg);
+
+        // Linked client even older than the grace period: not an orphan, must be ignored
+        ClientModel linked = mockLinkedClient("linked", "user-1", NOW - 100 * ONE_DAY_MS);
+
+        List<String> toDelete = task.collectPureOrphans(List.of(linked), NOW);
+
+        assertTrue(toDelete.isEmpty(), "Linked clients are not orphans and must be ignored here");
+    }
+
+    @Test
+    void collectPureOrphans_handlesCorruptedTimestamp() {
+        DcrLifecycleConfig cfg = new DcrLifecycleConfig(
+                DcrLifecycleConfig.Strategy.A, 30, false, 24, 60);
+        DcrOrphanCleanupTask task = taskWith(cfg);
+
+        ClientModel corrupted = Mockito.mock(ClientModel.class);
+        when(corrupted.getId()).thenReturn("corrupted");
+        when(corrupted.getAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID)).thenReturn(null);
+        when(corrupted.getAttribute(DcrLifecycleEventListenerProvider.ATTR_CREATED_AT)).thenReturn("not-a-number");
+
+        List<String> toDelete = task.collectPureOrphans(List.of(corrupted), NOW);
+
+        assertTrue(toDelete.isEmpty(), "Corrupted timestamp must default to safe (no deletion)");
+    }
+
+    @Test
+    void collectPureOrphans_mixedSet() {
+        DcrLifecycleConfig cfg = new DcrLifecycleConfig(
+                DcrLifecycleConfig.Strategy.A, 30, false, 24, 60);
+        DcrOrphanCleanupTask task = taskWith(cfg);
+
+        long gracePeriodMs = cfg.getGracePeriodMs();
+        ClientModel oldOrphan = mockOrphanClient("old-orphan", NOW - gracePeriodMs - ONE_DAY_MS);
+        ClientModel recentOrphan = mockOrphanClient("recent-orphan", NOW - 60 * 60 * 1000L);
+        ClientModel oldLinked = mockLinkedClient("old-linked", "user-1", NOW - 100 * ONE_DAY_MS);
+
+        List<String> toDelete = task.collectPureOrphans(
+                List.of(oldOrphan, recentOrphan, oldLinked), NOW);
+
+        assertEquals(1, toDelete.size());
+        assertTrue(toDelete.contains("old-orphan"));
     }
 }

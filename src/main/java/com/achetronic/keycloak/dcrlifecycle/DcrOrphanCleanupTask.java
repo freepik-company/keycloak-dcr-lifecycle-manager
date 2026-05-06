@@ -107,7 +107,8 @@ public class DcrOrphanCleanupTask implements ScheduledTask {
      * Returns the UUIDs of DCR clients that have never been linked to a user
      * and exceeded the grace period.
      */
-    private List<String> collectPureOrphans(List<ClientModel> dcrClients, long now) {
+    // Visibility: package-private for testing
+    List<String> collectPureOrphans(List<ClientModel> dcrClients, long now) {
         long gracePeriodMs = config.getGracePeriodMs();
         return dcrClients.stream()
                 .filter(c -> c.getAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID) == null)

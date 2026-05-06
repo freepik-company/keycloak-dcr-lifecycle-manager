@@ -2,8 +2,13 @@ package com.achetronic.keycloak.dcrlifecycle;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.keycloak.events.Event;
+import org.keycloak.events.EventType;
 import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientProvider;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.RealmProvider;
 import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
@@ -13,6 +18,9 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -136,5 +144,147 @@ class DcrLifecycleEventListenerProviderTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Event handler tests (CLIENT_REGISTER + LOGIN)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Wires up a fully mocked Keycloak session so that
+     * {@code session.realms().getRealm(realmId)} returns a realm and
+     * {@code session.clients().getClientByClientId(realm, clientId)} returns the given client.
+     */
+    private void wireSession(String realmId, String clientId, RealmModel realm, ClientModel client) {
+        RealmProvider realmProvider = Mockito.mock(RealmProvider.class);
+        ClientProvider clientProvider = Mockito.mock(ClientProvider.class);
+        when(sessionMock.realms()).thenReturn(realmProvider);
+        when(sessionMock.clients()).thenReturn(clientProvider);
+        when(realmProvider.getRealm(realmId)).thenReturn(realm);
+        when(clientProvider.getClientByClientId(realm, clientId)).thenReturn(client);
+    }
+
+    @Test
+    void onEvent_ignoresEventsWithError() {
+        Event event = Mockito.mock(Event.class);
+        when(event.getError()).thenReturn("some_error");
+
+        provider.onEvent(event);
+
+        // No interaction with realms/clients providers expected.
+        verify(sessionMock, never()).realms();
+        verify(sessionMock, never()).clients();
+    }
+
+    @Test
+    void onEvent_ignoresUnrelatedEventTypes() {
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.LOGOUT);
+
+        provider.onEvent(event);
+
+        verify(sessionMock, never()).realms();
+        verify(sessionMock, never()).clients();
+    }
+
+    @Test
+    void clientRegister_writesAllThreeAttributes() {
+        ClientModel client = Mockito.mock(ClientModel.class);
+        when(client.getClientId()).thenReturn("claude-1");
+        when(client.getName()).thenReturn("Claude");
+        Set<String> uris = new HashSet<>();
+        uris.add("https://claude.ai/cb");
+        when(client.getRedirectUris()).thenReturn(uris);
+
+        RealmModel realm = Mockito.mock(RealmModel.class);
+        wireSession("master", "claude-1", realm, client);
+
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.CLIENT_REGISTER);
+        when(event.getRealmId()).thenReturn("master");
+        when(event.getClientId()).thenReturn("claude-1");
+
+        provider.onEvent(event);
+
+        verify(client).setAttribute(DcrLifecycleEventListenerProvider.ATTR_IS_DCR_CLIENT, "true");
+        verify(client).setAttribute(Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_CREATED_AT), anyString());
+        verify(client).setAttribute(Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_FINGERPRINT), anyString());
+    }
+
+    @Test
+    void clientRegister_doesNotTagWhenClientNotFound() {
+        RealmModel realm = Mockito.mock(RealmModel.class);
+        wireSession("master", "unknown-client", realm, null);
+
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.CLIENT_REGISTER);
+        when(event.getRealmId()).thenReturn("master");
+        when(event.getClientId()).thenReturn("unknown-client");
+
+        provider.onEvent(event);
+        // No NPE, no tagging. The realms()/clients() mocks were called but no setAttribute happened.
+    }
+
+    @Test
+    void login_marksDcrClientWithLinkedUserAndUsedAt() {
+        ClientModel client = Mockito.mock(ClientModel.class);
+        when(client.getClientId()).thenReturn("claude-1");
+        // Tagged as DCR client
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_IS_DCR_CLIENT)).thenReturn("true");
+
+        RealmModel realm = Mockito.mock(RealmModel.class);
+        wireSession("master", "claude-1", realm, client);
+
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.LOGIN);
+        when(event.getRealmId()).thenReturn("master");
+        when(event.getClientId()).thenReturn("claude-1");
+        when(event.getUserId()).thenReturn("user-uuid");
+
+        provider.onEvent(event);
+
+        verify(client).setAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID, "user-uuid");
+        verify(client).setAttribute(Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_USED_AT), anyString());
+        // Hot path must NOT trigger any other client manipulation.
+        verify(client, never()).setAttribute(
+                Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_CREATED_AT), anyString());
+        verify(client, never()).setAttribute(
+                Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_FINGERPRINT), anyString());
+    }
+
+    @Test
+    void login_ignoresNonDcrClient() {
+        ClientModel client = Mockito.mock(ClientModel.class);
+        when(client.getClientId()).thenReturn("manual-client");
+        // NOT tagged as DCR client
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_IS_DCR_CLIENT)).thenReturn(null);
+
+        RealmModel realm = Mockito.mock(RealmModel.class);
+        wireSession("master", "manual-client", realm, client);
+
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.LOGIN);
+        when(event.getRealmId()).thenReturn("master");
+        when(event.getClientId()).thenReturn("manual-client");
+        when(event.getUserId()).thenReturn("user-uuid");
+
+        provider.onEvent(event);
+
+        // No tagging at all on manual clients.
+        verify(client, never()).setAttribute(anyString(), anyString());
+    }
+
+    @Test
+    void login_ignoresEventWithMissingFields() {
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.LOGIN);
+        when(event.getRealmId()).thenReturn("master");
+        when(event.getClientId()).thenReturn(null); // missing
+        when(event.getUserId()).thenReturn("user-uuid");
+
+        provider.onEvent(event);
+
+        // Not even reaching the realm lookup.
+        verify(sessionMock, never()).realms();
     }
 }
