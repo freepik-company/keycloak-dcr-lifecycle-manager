@@ -40,11 +40,24 @@ make package
 make run
 
 # Run integration tests
-python3 test_spi.py
+python3 scripts/test_spi.py
 
 # Stop the local Keycloak
 make stop
 ```
+
+## How to Enable in Keycloak
+
+Once the `.jar` is deployed to your Keycloak's `providers/` directory and the server is restarted, you must explicitly enable the Event Listener in your realm:
+
+1. Open the Keycloak Admin Console.
+2. Select your Realm.
+3. Go to **Realm settings** in the left menu.
+4. Go to the **Events** tab.
+5. In the **Event Listeners** field, add `dcr-user-linker`.
+6. Save the changes. 
+
+*(Note: The integration test script does this automatically via the Admin REST API).*
 
 ## How to Check Attributes
 

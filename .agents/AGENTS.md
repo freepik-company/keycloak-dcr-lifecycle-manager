@@ -20,7 +20,7 @@ We use a Dockerized Maven environment via the `Makefile` to avoid local Java/Mav
 - `make run`: Builds the JAR and starts a local Keycloak instance via `docker-compose.yml` (on port `8081`) for testing.
 - `make stop`: Stops the local Keycloak container.
 - `make clean`: Cleans the `target/` directory.
-- `python3 test_spi.py`: Runs a Python script that tests the DCR creation, the tagging, and the login linking/cleanup process via the Keycloak REST API.
+- `python3 scripts/test_spi.py`: Runs a Python script that tests the DCR creation, the tagging, and the login linking/cleanup process via the Keycloak REST API.
 
 ## 🏗️ Structure
 

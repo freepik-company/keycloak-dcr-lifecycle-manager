@@ -40,17 +40,56 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
 
     /**
      * Handles standard Keycloak events.
-     * Specifically looks for successful LOGIN events to link the user to a DCR client
-     * and trigger the garbage collection of older duplicate clients.
+     * Looks for CLIENT_REGISTER events to tag newly created DCR clients,
+     * and LOGIN events to link the user to a DCR client and trigger garbage collection.
      *
      * @param event The triggered Keycloak event.
      */
     @Override
     public void onEvent(Event event) {
-        // We only care about successful logins
-        if (event.getType() != EventType.LOGIN) {
+        if (event.getType() == EventType.CLIENT_REGISTER) {
+            handleClientRegister(event);
             return;
         }
+
+        if (event.getType() == EventType.LOGIN) {
+            handleLogin(event);
+            return;
+        }
+    }
+
+    private void handleClientRegister(Event event) {
+        String clientId = event.getClientId(); // Logical clientId
+        String realmId = event.getRealmId();
+
+        if (clientId == null || realmId == null) {
+            return;
+        }
+
+        RealmModel realm = session.realms().getRealm(realmId);
+        if (realm == null) {
+            return;
+        }
+
+        ClientModel clientModel = session.clients().getClientByClientId(realm, clientId);
+        if (clientModel == null) {
+            return;
+        }
+
+        try {
+            String fingerprint = calculateFingerprint(clientModel);
+            
+            long now = System.currentTimeMillis();
+            clientModel.setAttribute(ATTR_DCR_CREATED_AT, String.valueOf(now));
+            clientModel.setAttribute(ATTR_DCR_FINGERPRINT, fingerprint);
+            
+            log.infof("Tagged new DCR Client %s with fingerprint: %s", clientModel.getClientId(), fingerprint);
+        } catch (Exception e) {
+            log.error("Failed to process CLIENT_REGISTER event for new DCR client", e);
+        }
+    }
+
+    private void handleLogin(Event event) {
 
         String userId = event.getUserId();
         String clientId = event.getClientId();
@@ -113,47 +152,15 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
 
     /**
      * Handles Keycloak Admin events.
-     * Specifically looks for Client CREATE events to tag the newly created DCR client
-     * with its creation timestamp and deterministic fingerprint.
+     * We ignore Admin events because we only want to tag clients created via
+     * the standard OIDC DCR endpoint (CLIENT_REGISTER event), not clients created manually.
      *
      * @param event               The triggered Admin event.
      * @param includeRepresentation Whether the event includes the resource representation.
      */
     @Override
     public void onEvent(AdminEvent event, boolean includeRepresentation) {
-        // We only care about Client Creation
-        if (event.getResourceType() != ResourceType.CLIENT || event.getOperationType() != OperationType.CREATE) {
-            return;
-        }
-
-        // Only handle DCR (Dynamic Client Registration usually happens without an admin user in context,
-        // or through specific endpoints, but we'll tag it if we can parse the representation)
-        String clientUuid = event.getResourcePath().replace("clients/", "");
-        RealmModel realm = session.realms().getRealm(event.getRealmId());
-        
-        if (realm == null || clientUuid == null || clientUuid.isEmpty()) {
-            return;
-        }
-
-        ClientModel clientModel = session.clients().getClientById(realm, clientUuid);
-        if (clientModel == null) {
-            return;
-        }
-
-        try {
-            // Try to extract representation to calculate fingerprint
-            String fingerprint = calculateFingerprint(clientModel);
-            
-            // Tag the client
-            long now = System.currentTimeMillis();
-            clientModel.setAttribute(ATTR_DCR_CREATED_AT, String.valueOf(now));
-            clientModel.setAttribute(ATTR_DCR_FINGERPRINT, fingerprint);
-            
-            log.infof("Tagged new DCR Client %s with fingerprint: %s", clientModel.getClientId(), fingerprint);
-            
-        } catch (Exception e) {
-            log.error("Failed to process AdminEvent for new DCR client", e);
-        }
+        // Ignored to prevent tagging and deleting manually created clients
     }
 
     /**
