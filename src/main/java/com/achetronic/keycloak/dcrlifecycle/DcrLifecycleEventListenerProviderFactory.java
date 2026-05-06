@@ -11,12 +11,20 @@ import org.keycloak.timer.TimerProvider;
 
 /**
  * Factory for creating instances of {@link DcrLifecycleEventListenerProvider}.
- * Also responsible for scheduling the Orphan Cleanup Timer Task on startup.
+ * Also responsible for scheduling the orphan cleanup timer task on startup.
  */
 public class DcrLifecycleEventListenerProviderFactory implements EventListenerProviderFactory {
 
     private static final Logger log = Logger.getLogger(DcrLifecycleEventListenerProviderFactory.class);
+
+    /** Keycloak provider id used to register this Event Listener in the Realm settings. */
     public static final String PROVIDER_ID = "dcr-lifecycle-manager";
+
+    /** Name of the scheduled cleanup task registered into Keycloak's TimerProvider. */
+    private static final String CLEANUP_TASK_NAME = "dcr-orphan-cleanup-task";
+
+    /** Frequency of the scheduled cleanup task (1 hour, in milliseconds). */
+    private static final long CLEANUP_INTERVAL_MS = 60 * 60 * 1000L;
 
     @Override
     public EventListenerProvider create(KeycloakSession session) {
@@ -25,28 +33,26 @@ public class DcrLifecycleEventListenerProviderFactory implements EventListenerPr
 
     @Override
     public void init(Config.Scope config) {
-        // Initialization logic here
+        // No initialization required
     }
 
     @Override
     public void postInit(KeycloakSessionFactory factory) {
-        // Registramos la tarea programada en la fase de Post-Inicialización
+        // Register the scheduled task during the post-initialization phase.
         KeycloakModelUtils.runJobInTransaction(factory, session -> {
             TimerProvider timer = session.getProvider(TimerProvider.class);
             if (timer != null) {
-                // Programamos la limpieza cada hora (3,600,000 ms)
-                long intervalMs = 60 * 60 * 1000L;
-                timer.scheduleTask(new DcrOrphanCleanupTask(), intervalMs, "dcr-orphan-cleanup-task");
-                log.info("Tarea de limpieza de clientes DCR huérfanos programada (cada hora).");
+                timer.scheduleTask(new DcrOrphanCleanupTask(), CLEANUP_INTERVAL_MS, CLEANUP_TASK_NAME);
+                log.infof("Scheduled orphan DCR cleanup task '%s' every %d ms.", CLEANUP_TASK_NAME, CLEANUP_INTERVAL_MS);
             } else {
-                log.warn("TimerProvider no encontrado. No se ha programado la limpieza de huérfanos DCR.");
+                log.warn("TimerProvider not found. Orphan DCR cleanup task will NOT run.");
             }
         });
     }
 
     @Override
     public void close() {
-        // Cleanup logic here
+        // No resources to release
     }
 
     @Override
