@@ -1,0 +1,18 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.0
+    container_name: keycloak-dcr-lifecycle-manager-test
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # DCR Lifecycle Manager configuration (overridable from the host env)
+      DCR_LIFECYCLE_STRATEGY: ${DCR_LIFECYCLE_STRATEGY:-A}
+      DCR_LIFECYCLE_INACTIVITY_DAYS: ${DCR_LIFECYCLE_INACTIVITY_DAYS:-30}
+      DCR_LIFECYCLE_DELETE_LONELY_INACTIVE: ${DCR_LIFECYCLE_DELETE_LONELY_INACTIVE:-false}
+      DCR_LIFECYCLE_GRACE_PERIOD_HOURS: ${DCR_LIFECYCLE_GRACE_PERIOD_HOURS:-24}
+      DCR_LIFECYCLE_CLEANUP_INTERVAL_MINUTES: ${DCR_LIFECYCLE_CLEANUP_INTERVAL_MINUTES:-60}
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./target/keycloak-dcr-lifecycle-manager.jar:/opt/keycloak/providers/keycloak-dcr-lifecycle-manager.jar
