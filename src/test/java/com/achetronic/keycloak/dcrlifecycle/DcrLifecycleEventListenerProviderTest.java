@@ -302,4 +302,55 @@ class DcrLifecycleEventListenerProviderTest {
         // Not even reaching the realm lookup.
         verify(sessionMock, never()).realms();
     }
+
+    @Test
+    void login_reLinksWhenSameUserLogsInAgain() {
+        ClientModel client = Mockito.mock(ClientModel.class);
+        when(client.getClientId()).thenReturn("claude-1");
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_IS_DCR_CLIENT)).thenReturn("true");
+        // Already linked to the SAME user that is logging in now.
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID)).thenReturn("user-uuid");
+
+        RealmModel realm = Mockito.mock(RealmModel.class);
+        wireSession("master", "claude-1", realm, client);
+
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.LOGIN);
+        when(event.getRealmId()).thenReturn("master");
+        when(event.getClientId()).thenReturn("claude-1");
+        when(event.getUserId()).thenReturn("user-uuid");
+
+        provider.onEvent(event);
+
+        // Same owner: linked_user_id is re-written and used_at is refreshed.
+        verify(client).setAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID, "user-uuid");
+        verify(client).setAttribute(Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_USED_AT), anyString());
+    }
+
+    @Test
+    void login_refusesToTransferOwnershipToDifferentUser() {
+        ClientModel client = Mockito.mock(ClientModel.class);
+        when(client.getClientId()).thenReturn("claude-1");
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_IS_DCR_CLIENT)).thenReturn("true");
+        // Already linked to the VICTIM. An attacker now logs into the same client.
+        when(client.getAttribute(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID)).thenReturn("victim-uuid");
+
+        RealmModel realm = Mockito.mock(RealmModel.class);
+        wireSession("master", "claude-1", realm, client);
+
+        Event event = Mockito.mock(Event.class);
+        when(event.getType()).thenReturn(EventType.LOGIN);
+        when(event.getRealmId()).thenReturn("master");
+        when(event.getClientId()).thenReturn("claude-1");
+        when(event.getUserId()).thenReturn("attacker-uuid");
+
+        provider.onEvent(event);
+
+        // Ownership must NOT be transferred and used_at must NOT be bumped,
+        // otherwise Strategy A could later delete the victim's legitimate client.
+        verify(client, never()).setAttribute(
+                Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_LINKED_USER_ID), anyString());
+        verify(client, never()).setAttribute(
+                Mockito.eq(DcrLifecycleEventListenerProvider.ATTR_USED_AT), anyString());
+    }
 }

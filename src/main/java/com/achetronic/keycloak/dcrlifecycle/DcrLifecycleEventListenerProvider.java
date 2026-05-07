@@ -155,6 +155,18 @@ public class DcrLifecycleEventListenerProvider implements EventListenerProvider 
             return;
         }
 
+        // Ownership guard: once a DCR client is linked to a user, it cannot be transferred.
+        // Otherwise an attacker could register a DCR client with a forgeable fingerprint
+        // (deterministic over public data: redirect_uris + client name), phish the victim
+        // into completing a flow against it, and trigger Strategy A to delete the victim's
+        // legitimate client during the next cleanup pass.
+        String existingUserId = currentClient.getAttribute(ATTR_LINKED_USER_ID);
+        if (existingUserId != null && !existingUserId.equals(userId)) {
+            log.warnf("Refusing to transfer DCR client %s ownership: %s -> %s",
+                    currentClient.getClientId(), existingUserId, userId);
+            return;
+        }
+
         long now = System.currentTimeMillis();
         currentClient.setAttribute(ATTR_LINKED_USER_ID, userId);
         currentClient.setAttribute(ATTR_USED_AT, String.valueOf(now));

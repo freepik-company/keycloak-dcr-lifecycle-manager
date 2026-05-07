@@ -23,7 +23,8 @@ The `is_dcr_client` flag is the source of truth. The other attributes use generi
 
 ### `LOGIN`
 - Instant filter: if the client is not tagged with `is_dcr_client="true"`, return early.
-- Writes **2 attributes**: `linked_user_id` and `used_at`.
+- **Ownership guard**: if `linked_user_id` is already set and differs from the current user, the event is ignored (no attribute is rewritten). The first user that logs in becomes the permanent owner of that DCR client.
+- Writes **2 attributes**: `linked_user_id` and `used_at` (only when the guard above passes — i.e. first login or same owner re-login).
 - **No other clients are scanned and nothing is deleted at this point.** The hot path stays at constant O(1).
 - Rationale: performing synchronous cleanup during login introduced two risks:
     1. Unacceptable latency in large realms (scanning thousands of clients).
@@ -67,6 +68,17 @@ For semantic consistency: the flag explicitly declares the nature of the client.
 
 ### Why configure via environment variables instead of Keycloak's `Config.Scope`?
 Simpler to inject in containerized environments (Docker, Kubernetes) and consistent with standard 12-factor deployment practices.
+
+### Why an ownership guard on `LOGIN`?
+Without it, every successful login overwrites `linked_user_id`, opening a phishing-driven DoS:
+
+1. The victim owns a legitimate DCR client `victim-claude` with `linked_user_id=victim` and fingerprint `FP_claude` (alone in its `(victim, FP_claude)` group, so Strategy A never deletes it).
+2. The attacker registers `attacker-claude` with the same `client_name` and `redirect_uris` (the fingerprint is deterministic over public data, so it is trivially forgeable).
+3. The attacker phishes the victim into completing an OAuth flow against `attacker-claude`.
+4. The hot path rewrites `linked_user_id=victim` and bumps `used_at` on `attacker-claude`.
+5. The next cleanup pass sees two clients in the `(victim, FP_claude)` group and Strategy A deletes the older one — the legitimate `victim-claude`.
+
+The guard makes the first user that logs in the permanent owner of the DCR client; subsequent logins from a different user are ignored (no attribute rewritten, no `used_at` bump), so an attacker can never inject a forged sibling into the victim's group.
 
 ---
 
